@@ -268,7 +268,7 @@ def main():
         required=True,
         choices=["inpainting", "gaussian", "super", "nonlinear", "cloud"],
     )
-    parser.add_argument("--dataset", type=str, required=True) #, choices=["celeba", "church", "bedroom"])
+    parser.add_argument("--dataset", type=str, required=True, choices=["celeba", "church", "bedroom", "whu"])
     parser.add_argument("--model", type=str, required=True, choices=["celeba", "church", "bedroom", "whu"])
     parser.add_argument("--save_path", type=str, default="results/weak_result/")
     parser.add_argument("--data_path", type=str, default="data/")

@@ -49,8 +49,8 @@ def ddpm_step(model_output, img, i, ddpm_steps, beta, alpha, alpha_cumprod, devi
 
 def process_image(ref_img_path, model, forward_op, noise_model, mask_3ch, 
                   config, device, recon_save_path, measurement_save_path,
-                  beta, alpha, alpha_cumprod, ddpm_steps, op_inpainting,
-                  loss_lpips, loss_psnr, loss_ssim, seed):
+                  beta, alpha, alpha_cumprod, ddpm_steps, op_inpainting, 
+                  op_cloud_removal, loss_lpips, loss_psnr, loss_ssim, seed):
     """Process a single image."""
     
     H, W = 256, 256
@@ -64,6 +64,9 @@ def process_image(ref_img_path, model, forward_op, noise_model, mask_3ch,
     if op_inpainting:
         masked_image = forward_op.forward(ref_tensor, mask=mask_3ch)
         measurement = noise_model(masked_image)
+    elif op_cloud_removal:
+        cloud_mask = forward_op.get_cloud_mask(ref_tensor)
+        measurement = noise_model(forward_op.forward(ref_tensor, mask=cloud_mask))
     else:
         measurement = noise_model(forward_op.forward(ref_tensor)).detach()
 
@@ -95,6 +98,8 @@ def process_image(ref_img_path, model, forward_op, noise_model, mask_3ch,
         # Compute gradient
         if op_inpainting:
             difference = measurement - forward_op.forward(pred_x_start, mask=mask_3ch)
+        elif op_cloud_removal:
+            difference = measurement - forward_op.forward(pred_x_start, mask=cloud_mask)
         else:
             difference = measurement - forward_op.forward(pred_x_start)
         
@@ -131,13 +136,13 @@ def main():
         "--task",
         type=str,
         required=True,
-        choices=["inpainting", "gaussian", "super", "nonlinear"],
+        choices=["inpainting", "gaussian", "super", "nonlinear", "cloud"],
     )
     parser.add_argument('--dataset', type=str, required=True,
-                       choices=['celeba', 'church', 'bedroom'],
+                       choices=['celeba', 'church', 'bedroom', 'whu'],
                        help='Dataset name')
     parser.add_argument('--model', type=str, required=True,
-                       choices=['celeba', 'church', 'bedroom'],
+                       choices=['celeba', 'church', 'bedroom', 'whu'],
                        help='Model name')
     parser.add_argument('--save_path', type=str, default='results/dps_result',
                        help='Base path for saving results')
@@ -162,7 +167,7 @@ def main():
     print(f"Using device: {device}")
     
     # Load config
-    task_choice_name = {"inpainting" : "inpainting", "gaussian":"gaussian_blur", "super":"super_resolution", "nonlinear":"nonlinear_blur"}
+    task_choice_name = {"inpainting" : "inpainting", "gaussian":"gaussian_blur", "super":"super_resolution", "nonlinear":"nonlinear_blur", "cloud": "cloud_removal"}
     print(f"Loading config for task: {args.task}")
     # config = load_config(args.task)
     config = load_config(task_choice_name[args.task])
@@ -216,7 +221,7 @@ def main():
         print(f"{'='*60}")
         
         # Setup forward operator (new mask for each image for inpainting)
-        forward_op, noise_model, mask, mask_3ch, op_inpainting, op_cloud_mask = setup_forward_operator(
+        forward_op, noise_model, mask, mask_3ch, op_inpainting, op_cloud_removal = setup_forward_operator(
             config, device, H=256, W=256
         )
         
@@ -227,7 +232,7 @@ def main():
             img_path, model, forward_op, noise_model, mask_3ch,
             config, device, recon_save_path, measure_save_path,
             beta, alpha, alpha_cumprod, ddpm_steps, op_inpainting,
-            loss_lpips, loss_psnr, loss_ssim, seed
+            op_cloud_removal, loss_lpips, loss_psnr, loss_ssim, seed
         )
         
         all_metrics[img_path.stem] = metrics
