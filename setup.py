@@ -49,7 +49,8 @@ def get_model_id(dataset_name: str) -> str:
     model_map = {
         'celeba': 'google/ddpm-ema-celebahq-256',
         'church': 'google/ddpm-ema-church-256',
-        'bedroom': 'google/ddpm-ema-bedroom-256'
+        'bedroom': 'google/ddpm-ema-bedroom-256',
+        'whu': 'ddpm-whu/checkpoint-100/unet/',
     }
     
     if dataset_name not in model_map:
@@ -91,6 +92,7 @@ def setup_forward_operator(config: dict, device: torch.device, H: int = 256, W: 
         
         mask_3ch = MaskGenerator.expand_mask_channels(mask, 3)
         op_inpainting = True
+        op_cloud_removal = False
         
     elif op_name == 'super_resolution':
         scale_factor = operator_config['scale_factor']
@@ -100,6 +102,7 @@ def setup_forward_operator(config: dict, device: torch.device, H: int = 256, W: 
                                  scale_factor=scale_factor, 
                                  device=device)
         op_inpainting = False
+        op_cloud_removal = False
         
     elif op_name == 'gaussian_blur':
         kernel_size = operator_config['kernel_size']
@@ -111,16 +114,28 @@ def setup_forward_operator(config: dict, device: torch.device, H: int = 256, W: 
         }
         forward_op = get_operator('gaussian_blur', **operator_params)
         op_inpainting = False
+        op_cloud_removal = False
         
     elif op_name == 'nonlinear_blur':
         opt_yml_path = operator_config['opt_yml_path']
         forward_op = get_operator('nonlinear_blur', opt_yml_path=opt_yml_path, device=device)
         op_inpainting = False
+        op_cloud_removal = False
+
+    elif op_name == 'cloud_removal':
+        opacity = operator_config['opacity']
+        operator_params = {
+            'device': device,
+            'opacity': opacity
+        }
+        forward_op = get_operator('cloud_removal', **operator_params)
+        op_inpainting = False
+        op_cloud_removal = True
     
     else:
         raise ValueError(f"Unknown operator: {op_name}")
     
-    return forward_op, noise_model, mask, mask_3ch, op_inpainting
+    return forward_op, noise_model, mask, mask_3ch, op_inpainting, op_cloud_removal
 
 def build_optimizer(params, name: str, lr: float, beta1: float, beta2: float, radius: float, retraction: str):
     if name == "AdamOnSphere":

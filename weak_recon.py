@@ -15,6 +15,8 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 import pyiqa
+
+from torchvision.transforms.functional import to_pil_image
     
 def process_image(
     ref_img_path,
@@ -27,6 +29,7 @@ def process_image(
     ps_recon_save_path,
     measure_save_path,
     op_inpainting,
+    op_cloud_removal,
     loss_lpips,
     loss_psnr,
     loss_ssim,
@@ -50,6 +53,9 @@ def process_image(
     if op_inpainting:
         masked_image = forward_op.forward(ref_tensor, mask=mask_3ch)
         measurement = noise_model(masked_image)
+    elif op_cloud_removal:
+        cloud_mask = forward_op.get_cloud_mask(ref_tensor)
+        measurement = noise_model(forward_op.forward(ref_tensor, mask=cloud_mask))
     else:
         measurement = noise_model(forward_op.forward(ref_tensor)).detach()
 
@@ -74,18 +80,30 @@ def process_image(
         meas_channels = measurement.shape[1]
         meas_h, meas_w = measurement.shape[-2:]
         train_keep_ratio = early_stop_ratio
-        if op_inpainting:
-            available_mask = mask_3ch[0, 0:1].to(device)  # single channel mask
-            random_draw = torch.rand_like(available_mask)
-            train_mask = ((random_draw < train_keep_ratio) * available_mask).float()
-            val_mask = (available_mask - train_mask).clamp(min=0.0)
-        else:
-            train_mask = MaskGenerator.random_mask(meas_h, meas_w, keep_ratio=train_keep_ratio).to(device)
+        if op_cloud_removal:
+            available_weight = (1.0 - forward_op.opacity * cloud_mask).clamp(min=0.0)
+            random_draw = torch.rand_like(available_weight)
+            train_mask = ((random_draw < train_keep_ratio)).float()
             val_mask = 1.0 - train_mask
-        train_mask3 = MaskGenerator.expand_mask_channels(train_mask, meas_channels)
-        val_mask3 = MaskGenerator.expand_mask_channels(val_mask, meas_channels)
-        y_train = (train_mask3 * measurement).detach()
-        y_val = (val_mask3 * measurement).detach()
+
+            train_weight3 = train_mask * available_weight
+            val_weight3 = val_mask * available_weight
+
+            y_train = (train_weight3 * measurement).detach()
+            y_val = (val_weight3 * measurement).detach()
+        else:
+            if op_inpainting:
+                available_mask = mask_3ch[0, 0:1].to(device)  # single channel mask
+                random_draw = torch.rand_like(available_mask)
+                train_mask = ((random_draw < train_keep_ratio) * available_mask).float()
+                val_mask = (available_mask - train_mask).clamp(min=0.0)
+            else:
+                train_mask = MaskGenerator.random_mask(meas_h, meas_w, keep_ratio=train_keep_ratio).to(device)
+                val_mask = 1.0 - train_mask
+            train_mask3 = MaskGenerator.expand_mask_channels(train_mask, meas_channels)
+            val_mask3 = MaskGenerator.expand_mask_channels(val_mask, meas_channels)
+            y_train = (train_mask3 * measurement).detach()
+            y_val = (val_mask3 * measurement).detach()
         earlystop = SimpleHoldOutStop(patience=1000, best_k=early_stop_best_k)
     elif early_stop == "variance":
         print("Using variance-based early stopping.")
@@ -118,14 +136,20 @@ def process_image(
         )
 
         if early_stop == "holdout_simple":
-            if op_inpainting:
-                pred_measurement = forward_op.forward(x_0, mask=mask_3ch)
+            if op_cloud_removal:
+                pred_measurement = forward_op.forward(x_0, mask=cloud_mask)
+                loss = criterion(train_weight3 * pred_measurement, y_train)
             else:
-                pred_measurement = forward_op.forward(x_0)
-            loss = criterion(train_mask3 * pred_measurement, y_train)
+                if op_inpainting:
+                    pred_measurement = forward_op.forward(x_0, mask=mask_3ch)
+                else:
+                    pred_measurement = forward_op.forward(x_0)
+                loss = criterion(train_mask3 * pred_measurement, y_train)
         else:
             if op_inpainting:
                 pred_measurement = forward_op.forward(x_0, mask=mask_3ch)
+            elif op_cloud_removal:
+                pred_measurement = forward_op.forward(x_0, mask=cloud_mask)
             else:
                 pred_measurement = forward_op.forward(x_0)
             loss = criterion(pred_measurement, measurement)
@@ -153,7 +177,10 @@ def process_image(
                 best_img = x_0.detach()
             
             if early_stop == "holdout_simple":
-                val_loss = criterion(val_mask3 * pred_measurement, y_val).item()
+                if op_cloud_removal:
+                    val_loss = criterion(val_weight3 * pred_measurement, y_val).item()
+                else:
+                    val_loss = criterion(val_mask3 * pred_measurement, y_val).item()
                 stop_flag, best_epoch = earlystop.update(val_loss, iteration)
                 
                 if best_epoch is not None and best_epoch == iteration:
@@ -239,12 +266,12 @@ def main():
         "--task",
         type=str,
         required=True,
-        choices=["inpainting", "gaussian", "super", "nonlinear"],
+        choices=["inpainting", "gaussian", "super", "nonlinear", "cloud"],
     )
-    parser.add_argument("--dataset", type=str, required=True, choices=["celeba", "church", "bedroom"])
-    parser.add_argument("--model", type=str, required=True, choices=["celeba", "church", "bedroom"])
-    parser.add_argument("--save_path", type=str, default="weak_result")
-    parser.add_argument("--data_path", type=str, default="data")
+    parser.add_argument("--dataset", type=str, required=True) #, choices=["celeba", "church", "bedroom"])
+    parser.add_argument("--model", type=str, required=True, choices=["celeba", "church", "bedroom", "whu"])
+    parser.add_argument("--save_path", type=str, default="results/weak_result/")
+    parser.add_argument("--data_path", type=str, default="data/")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
@@ -257,6 +284,7 @@ def main():
     parser.add_argument("--early_stop", type=str, default="holdout_simple", choices=["variance", "holdout_simple"])
     parser.add_argument("--early_stop_best_k", type=int, default=100)
     parser.add_argument("--early_stop_ratio", type=float, default=0.9)
+    parser.add_argument("--save_process", default=False, action="store_true")
 
     args = parser.parse_args()
 
@@ -268,7 +296,7 @@ def main():
     device = torch.device(f"cuda:{args.gpu}")
     print(f"Using device: {device}")
 
-    task_choice_name = {"inpainting" : "inpainting", "gaussian":"gaussian_blur", "super":"super_resolution", "nonlinear":"nonlinear_blur"}
+    task_choice_name = {"cloud": "cloud_removal", "inpainting" : "inpainting", "gaussian":"gaussian_blur", "super":"super_resolution", "nonlinear":"nonlinear_blur"}
     config = load_config(task_choice_name[args.task])
 
     model_id = get_model_id(args.model)
@@ -284,7 +312,8 @@ def main():
     if not data_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {data_dir}")
 
-    image_files = sorted(list(data_dir.glob("*.png")))
+    image_files = sorted(list(data_dir.glob("*.jpg")) + list(data_dir.glob("*.png")) + list(data_dir.glob("*.jpeg")))
+        
     image_files = image_files[args.start : args.end]
     print(f"Found {len(image_files)} images in {data_dir}")
 
@@ -308,7 +337,7 @@ def main():
         print(f"Processing: {img_path.name}")
         print(f"{'='*60}")
 
-        forward_op, noise_model, _, mask_3ch, op_inpainting = setup_forward_operator(config, device, H=256, W=256)
+        forward_op, noise_model, _, mask_3ch, op_inpainting, op_cloud_removal = setup_forward_operator(config, device, H=256, W=256)
 
         es_recon_save_path = recon_dir / f"{img_path.stem}_es_recon.npy"
         ps_recon_save_path = recon_dir / f"{img_path.stem}_ps_recon.npy"
@@ -326,6 +355,7 @@ def main():
             ps_recon_save_path,
             measure_save_path,
             op_inpainting,
+            op_cloud_removal,
             loss_lpips,
             loss_psnr,
             loss_ssim,
@@ -339,7 +369,7 @@ def main():
             args.early_stop_best_k,
             args.early_stop_ratio,
             process_save_path=process_save_path,
-            save_process=False,
+            save_process=args.save_process,
             seed = seed
         )
 

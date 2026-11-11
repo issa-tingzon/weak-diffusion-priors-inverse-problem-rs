@@ -21,6 +21,8 @@ import torch.nn.functional as F
 from torch import nn
 import numpy as np
 
+import satellite_cloud_generator as scg
+
 # Optional imports - comment out if not available
 try:
     from motionblur.motionblur import Kernel
@@ -33,6 +35,10 @@ try:
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Utility imports (you'll need to ensure these are available)
 from util.resizer import Resizer
@@ -208,7 +214,6 @@ class MaskGenerator:
         """Expand mask from (B, 1, H, W) to (B, C, H, W)."""
         return mask.repeat(1, num_channels, 1, 1)
 
-
 # ==================
 # Linear Operators
 # ==================
@@ -375,6 +380,41 @@ class NonlinearBlurOperator(NonLinearOperator):
         blurred = self.blur_model.adaptKernel(data, kernel=random_kernel)
         blurred = (blurred * 2.0 - 1.0).clamp(-1, 1) #[0, 1] -> [-1, 1]
         return blurred
+
+@OPERATOR_REGISTRY.register('cloud_removal')
+class CloudOperator(NonLinearOperator):
+    def __init__(self, mask=None, opacity=1.0, device=None):
+        self.mask = mask
+        self.opacity = opacity
+        self.device = device or torch.device('cpu')
+
+    def forward(self, data, **kwargs):
+        # Use explicitly supplied mask, or cached mask
+        mask = kwargs.get('mask', self.mask)
+
+        mask = mask.to(device=data.device, dtype=data.dtype)
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(1)
+
+        return (data * (1 - self.opacity * mask) + self.opacity * mask)
+
+    def get_cloud_mask(self, data):
+        if self.mask is not None:
+            return self.mask
+
+        data_normalized = (data.detach() + 1.0) / 2.0
+        data_np = data_normalized.cpu().numpy()
+
+        # Generate cloud mask
+        _, cloud_mask_np = scg.add_cloud(
+            data_np,
+            min_lvl=0.0,
+            max_lvl=1.0,
+            return_cloud=True
+        )
+        self.mask = cloud_mask_np.float().to(self.device)
+
+        return self.mask
 
 # ==================
 # Noise Models

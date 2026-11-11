@@ -2,9 +2,9 @@
 # python dps_recon.py --gpu 0 --task inpainting --dataset celeba --model celeba --start 0 --end 1
 import argparse
 from pathlib import Path
+from xml.parsers.expat import model
 
 from src.model import load_model
-from src.DDIM_grad_sample import *
 from src.image_operator import *
 from src.scheduler import load_scheduler
 from setup import *
@@ -28,7 +28,7 @@ def ddpm_step(model_output, img, i, ddpm_steps, beta, alpha, alpha_cumprod, devi
         alpha_cumprod_prev = alpha_cumprod[curr_step - 1]
 
     ##### Formula (15) #####
-    predicted_x0 = (img - torch.sqrt(1.0 - alpha_cumprod_curr) * model_output) / torch.sqrt(
+    predicted_x0 = (img - torch.sqrt(1.0 - alpha_cumprod_curr) * model_output.sample) / torch.sqrt(
         alpha_cumprod_curr)
     predicted_x0 = predicted_x0.clamp(min=-1.0, max=1.0)
 
@@ -85,7 +85,9 @@ def process_image(ref_img_path, model, forward_op, noise_model, mask_3ch,
     
     for idx in pbar:
         img = img.requires_grad_()
-        model_output = model(img, ddpm_steps[idx]).sample
+        #model_output = model(img, ddpm_steps[idx]).sample
+        t = ddpm_steps[idx].to(img.device).reshape(1).expand(img.shape[0])
+        model_output = model(img, t)
         
         pred_x_t, pred_x_start = ddpm_step(model_output, img, idx, ddpm_steps, 
                                            beta, alpha, alpha_cumprod, device)
@@ -137,9 +139,9 @@ def main():
     parser.add_argument('--model', type=str, required=True,
                        choices=['celeba', 'church', 'bedroom'],
                        help='Model name')
-    parser.add_argument('--save_path', type=str, default='dps_result',
+    parser.add_argument('--save_path', type=str, default='results/dps_result',
                        help='Base path for saving results')
-    parser.add_argument('--data_path', type=str, default='data',
+    parser.add_argument('--data_path', type=str, default='data/',
                        help='Base path for data')
     parser.add_argument('--start', type=int, default=0,
                        help='start index for data')
@@ -214,7 +216,7 @@ def main():
         print(f"{'='*60}")
         
         # Setup forward operator (new mask for each image for inpainting)
-        forward_op, noise_model, mask, mask_3ch, op_inpainting = setup_forward_operator(
+        forward_op, noise_model, mask, mask_3ch, op_inpainting, op_cloud_mask = setup_forward_operator(
             config, device, H=256, W=256
         )
         

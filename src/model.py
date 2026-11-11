@@ -1,7 +1,10 @@
+from os import pipe
+
 import torch
 import torchvision
 from torch.utils.data import DataLoader
 from diffusers import UNet2DModel,DDIMScheduler,DiffusionPipeline
+from diffusers import DDIMScheduler, DiffusionPipeline
 
 def load_model(repo_id="google/ddpm-cifar10-32"):
     model = (UNet2DModel.from_pretrained(repo_id))
