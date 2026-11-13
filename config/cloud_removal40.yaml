@@ -1,0 +1,11 @@
+measurement:
+  operator:
+    name: cloud_removal
+    opacity: 0.4
+  noise:
+    name: gaussian
+    sigma: 0.01
+
+# Algorithm parameters
+dps_algo:
+  scale: 0.3
