@@ -266,7 +266,7 @@ def main():
         "--task",
         type=str,
         required=True,
-        choices=["inpainting", "gaussian", "super", "nonlinear", "cloud"],
+        choices=["inpainting", "gaussian", "super", "nonlinear", "cloud20", "cloud40", "cloud60", "cloud80", "cloud100"],
     )
     parser.add_argument("--dataset", type=str, required=True, choices=["celeba", "church", "bedroom", "whu"])
     parser.add_argument("--model", type=str, required=True, choices=["celeba", "church", "bedroom", "whu"])
@@ -296,7 +296,17 @@ def main():
     device = torch.device(f"cuda:{args.gpu}")
     print(f"Using device: {device}")
 
-    task_choice_name = {"cloud": "cloud_removal", "inpainting" : "inpainting", "gaussian":"gaussian_blur", "super":"super_resolution", "nonlinear":"nonlinear_blur"}
+    task_choice_name = {
+        "cloud20": "cloud_removal20",
+        "cloud40": "cloud_removal40", 
+        "cloud60": "cloud_removal60", 
+        "cloud80": "cloud_removal80", 
+        "cloud100": "cloud_removal100", 
+        "inpainting" : "inpainting", 
+        "gaussian":"gaussian_blur", 
+        "super":"super_resolution", 
+        "nonlinear":"nonlinear_blur"
+    }
     config = load_config(task_choice_name[args.task])
 
     model_id = get_model_id(args.model)

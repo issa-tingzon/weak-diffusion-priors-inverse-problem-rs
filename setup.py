@@ -50,7 +50,7 @@ def get_model_id(dataset_name: str) -> str:
         'celeba': 'google/ddpm-ema-celebahq-256',
         'church': 'google/ddpm-ema-church-256',
         'bedroom': 'google/ddpm-ema-bedroom-256',
-        'whu': 'ddpm-whu/checkpoint-100/unet/',
+        'whu': 'ddpm-whu/checkpoint-150/unet/',
     }
     
     if dataset_name not in model_map:
