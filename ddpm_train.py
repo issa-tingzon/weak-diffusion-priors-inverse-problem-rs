@@ -43,7 +43,7 @@ class TrainingConfig:
     #dataset_name = "giswqs/WHU-Building-Dataset"
     dataset_name = "timm/resisc45"
     dataset_split = False
-    #output_dir = "ddpm-ema-whu"  # the model name locally and on the HF Hub
+    output_dir = "ddpm-ema-resisc45"  # the model name locally and on the HF Hub
     resume_from_checkpoint = None
 
     test_size = 100
@@ -51,7 +51,7 @@ class TrainingConfig:
     test_path = "data/resisc45"
 
     push_to_hub = False  # whether to upload the saved model to the HF Hub
-    hub_model_id = "issatingzon/ddpm-ema-whu"  # the name of the repository to create on the HF Hub
+    hub_model_id = "issatingzon/ddpm-ema-resisc45"  # the name of the repository to create on the HF Hub
     hub_private_repo = None
     overwrite_output_dir = True  # overwrite the old model when re-running the notebook
     seed = 0
