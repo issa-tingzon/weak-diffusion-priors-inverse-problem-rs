@@ -40,18 +40,16 @@ class TrainingConfig:
     save_image_epochs = 5
     save_model_epochs = 25
     mixed_precision = "fp16"  # `no` for float32, `fp16` for automatic mixed precision
-    #dataset_name = "giswqs/WHU-Building-Dataset"
-    dataset_name = "timm/resisc45"
-    dataset_split = False
-    output_dir = "ddpm-ema-resisc45"  # the model name locally and on the HF Hub
-    resume_from_checkpoint = None
+    dataset_name = "giswqs/WHU-Building-Dataset" #"timm/resisc45"
+    dataset_split = True
+    output_dir = "ddpm-ema-whu"  # the model name locally and on the HF Hub
+    resume_from_checkpoint = "ddpm-ema-whu/checkpoint-150"
 
     test_size = 100
-    #test_path = "data/whu"
-    test_path = "data/resisc45"
+    test_path = "data/whu" #"data/resisc45"
 
     push_to_hub = False  # whether to upload the saved model to the HF Hub
-    hub_model_id = "issatingzon/ddpm-ema-resisc45"  # the name of the repository to create on the HF Hub
+    hub_model_id = "issatingzon/ddpm-ema-whu"  # the name of the repository to create on the HF Hub
     hub_private_repo = None
     overwrite_output_dir = True  # overwrite the old model when re-running the notebook
     seed = 0
@@ -60,11 +58,37 @@ config = TrainingConfig()
 preprocess = transforms.Compose(
     [
         transforms.Resize((config.image_size, config.image_size)),
+        transforms.RandomVerticalFlip(),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize([0.5], [0.5]),
     ]
 )
+
+def unet_model(config):
+    return UNet2DModel(
+        sample_size=config.image_size,  # the target image resolution
+        in_channels=3,  # the number of input channels, 3 for RGB images
+        out_channels=3,  # the number of output channels
+        layers_per_block=2,  # how many ResNet layers to use per UNet block
+        block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channels for each UNet block
+        down_block_types=(
+            "DownBlock2D",  # a regular ResNet downsampling block
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
+            "DownBlock2D",
+        ),
+        up_block_types=(
+            "UpBlock2D",  # a regular ResNet upsampling block
+            "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        ),
+    )
 
 def prepare_test_set(config):
     test = load_dataset(config.dataset_name, split="test")
@@ -170,7 +194,6 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
-    ema_model.to(accelerator.device)
     accelerator.register_for_checkpointing(ema_model)
 
     start_epoch = 0
@@ -181,6 +204,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
         print(f"Loading checkpoint: {checkpoint_dir}")
 
         accelerator.load_state(checkpoint_dir)
+        ema_model.to(accelerator.device)
 
         training_state = torch.load(
             os.path.join(checkpoint_dir, "training_state.pt"),
@@ -293,8 +317,6 @@ def main():
         test = prepare_test_set(config)
         save_images(test, config.test_path)
 
-    return
-
     dataset.set_transform(transform)
     train_dataloader = torch.utils.data.DataLoader(
         dataset, 
@@ -302,29 +324,7 @@ def main():
         shuffle=True
     )
 
-    model = UNet2DModel(
-        sample_size=config.image_size,  # the target image resolution
-        in_channels=3,  # the number of input channels, 3 for RGB images
-        out_channels=3,  # the number of output channels
-        layers_per_block=2,  # how many ResNet layers to use per UNet block
-        block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channels for each UNet block
-        down_block_types=(
-            "DownBlock2D",  # a regular ResNet downsampling block
-            "DownBlock2D",
-            "DownBlock2D",
-            "DownBlock2D",
-            "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
-            "DownBlock2D",
-        ),
-        up_block_types=(
-            "UpBlock2D",  # a regular ResNet upsampling block
-            "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
-            "UpBlock2D",
-            "UpBlock2D",
-            "UpBlock2D",
-            "UpBlock2D",
-        ),
-    )
+    model = unet_model(config)
     ema_model = EMAModel(
         model.parameters(),
         decay=0.9999,
