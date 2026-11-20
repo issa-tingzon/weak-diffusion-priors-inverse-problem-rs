@@ -24,6 +24,8 @@ from pathlib import Path
 import os
 
 from diffusers.training_utils import EMAModel
+from torch.utils.data import IterableDataset, DataLoader
+from datasets import load_dataset
 
 
 from tqdm import tqdm
@@ -37,19 +39,21 @@ class TrainingConfig:
     gradient_accumulation_steps = 1
     learning_rate = 1e-4
     lr_warmup_steps = 500
-    save_image_epochs = 5
-    save_model_epochs = 25
+    save_image_epochs = 1
+    save_model_epochs = 1
     mixed_precision = "fp16"  # `no` for float32, `fp16` for automatic mixed precision
-    dataset_name = "giswqs/WHU-Building-Dataset" #"timm/resisc45"
-    dataset_split = True
-    output_dir = "ddpm-ema-whu"  # the model name locally and on the HF Hub
-    resume_from_checkpoint = "ddpm-ema-whu/checkpoint-150"
+    dataset_name = "gaetanbahl/Global-Scale-Road-Dataset"
+    split_dataset = False
+    expand_dataset = True
+    output_dir = "ddpm-ema-gsrd"  # the model name locally and on the HF Hub
+    resume_from_checkpoint = "ddpm-ema-gsrd/checkpoint-17"
+    n_splits = 8
 
     test_size = 100
-    test_path = "data/whu" #"data/resisc45"
+    test_path = "data/gsrd"
 
     push_to_hub = False  # whether to upload the saved model to the HF Hub
-    hub_model_id = "issatingzon/ddpm-ema-whu"  # the name of the repository to create on the HF Hub
+    hub_model_id = "issatingzon/ddpm-ema-gsrd"  # the name of the repository to create on the HF Hub
     hub_private_repo = None
     overwrite_output_dir = True  # overwrite the old model when re-running the notebook
     seed = 0
@@ -64,6 +68,31 @@ preprocess = transforms.Compose(
         transforms.Normalize([0.5], [0.5]),
     ]
 )
+
+class PatchDataset(IterableDataset):
+    def __init__(self, dataset, config, n_splits=8):
+        self.dataset = dataset
+        self.config = config
+
+    def __iter__(self):
+        for sample in self.dataset:
+            image = sample["image"]
+            if image.mode != "RGB":
+                continue
+
+            if self.config.expand_dataset:
+                patches = split_into_patches(
+                    image.convert("RGB"),
+                    n=self.config.n_splits,
+                    patch_size=self.config.image_size
+                )
+            else:
+                patches = [image.convert("RGB")]
+
+            for patch in patches:
+                yield {
+                    "images": preprocess(patch)
+                }
 
 def unet_model(config):
     return UNet2DModel(
@@ -92,23 +121,29 @@ def unet_model(config):
 
 def prepare_test_set(config):
     test = load_dataset(config.dataset_name, split="test")
-    if config.dataset_split:
+
+    if config.split_dataset:
         test = split_dataset(test)
 
     test = test.shuffle(seed=config.seed)
-    test = test.select(range(min(config.test_size, len(test))))
     rng = torch.Generator().manual_seed(config.seed)
 
     patches = []
     for sample in test:
-        image = sample["image"].convert("RGB")
-        if config.dataset_split:
-            candidates = split_into_patches(image)
+        image = sample["image"]
 
-            idx = torch.randint(0, len(candidates), (1,), generator=rng).item()
-            patches.append({"image": candidates[idx]})
-        else: 
+        if image.mode == "RGB":
+            if config.expand_dataset:
+                candidates = split_into_patches(image)
+                idx = torch.randint(
+                    0, len(candidates), (1,), generator=rng
+                ).item()
+                image = candidates[idx]
+
             patches.append({"image": image})
+
+            if len(patches) >= config.test_size:
+                break
 
     return Dataset.from_list(patches)
 
@@ -119,25 +154,31 @@ def save_images(dataset, output_dir):
     for i, sample in enumerate(dataset):
         sample["image"].save(output_dir / f"{i}.png")
 
-def split_into_patches(image, patch_size = 256):
-    if image.size != (512, 512):
-        image = image.resize((512, 512), Image.Resampling.BILINEAR)
+def split_into_patches(image, n=8, patch_size=256):
     w, h = image.size
 
-    positions = [
-        (0, 0),
-        (w - patch_size, 0),
-        (0, h - patch_size),
-        (w - patch_size, h - patch_size),
-    ]
+    patches = []
 
-    return [
-        image.crop((x, y, x + patch_size, y + patch_size))
-        for x, y in positions
-    ]
+    for i in range(n):
+        for j in range(n):
+            left = int(j * w / n)
+            upper = int(i * h / n)
+            right = int((j + 1) * w / n)
+            lower = int((i + 1) * h / n)
+
+            patch = image.crop((left, upper, right, lower))
+            patch = patch.resize((patch_size, patch_size))
+
+            patches.append(patch)
+
+    return patches
 
 def transform(examples):
-    images = [preprocess(image.convert("RGB")) for image in examples["image"]]
+    images = [
+        preprocess(image) 
+        for image in examples["image"]
+        if image.mode == "RGB"
+    ]
     return {"images": images}
 
 def split_dataset(dataset):
@@ -174,7 +215,7 @@ def evaluate(config, epoch, pipeline):
     os.makedirs(test_dir, exist_ok=True)
     image_grid.save(f"{test_dir}/{epoch:04d}.png")
 
-def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, ema_model):
+def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, ema_model, len_dataset):
     # Initialize accelerator and tensorboard logging
     accelerator = Accelerator(
         mixed_precision=config.mixed_precision,
@@ -220,7 +261,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
 
     # Now you train the model
     for epoch in range(start_epoch, config.num_epochs):
-        progress_bar = tqdm(total=len(train_dataloader), disable=not accelerator.is_local_main_process)
+        progress_bar = tqdm(total=len_dataset, disable=not accelerator.is_local_main_process)
         progress_bar.set_description(f"Epoch {epoch}")
 
         for step, batch in enumerate(train_dataloader):
@@ -308,23 +349,28 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
             accelerator.wait_for_everyone()
 
 def main():
-    dataset = load_dataset(config.dataset_name, split="train")
-    if config.dataset_split:
-        dataset = split_dataset(dataset)
-        dataset = expand_dataset(dataset)
-
     if not os.path.exists(config.test_path):
         test = prepare_test_set(config)
         save_images(test, config.test_path)
 
-    dataset.set_transform(transform)
-    train_dataloader = torch.utils.data.DataLoader(
-        dataset, 
-        batch_size=config.train_batch_size, 
-        shuffle=True
-    )
+    dataset = load_dataset(config.dataset_name, split="train")
+    dataset = dataset.shuffle(seed=config.seed)
+    if config.split_dataset:
+        dataset = split_dataset(dataset)
 
+    #if config.expand_dataset:
+    #    dataset = expand_dataset(dataset)
+    #dataset.set_transform(transform)
+
+    train_dataset = PatchDataset(dataset, config)
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, 
+        batch_size=config.train_batch_size, 
+        #shuffle=True
+    )
     model = unet_model(config)
+    model = model.to("cuda:0")
+
     ema_model = EMAModel(
         model.parameters(),
         decay=0.9999,
@@ -333,14 +379,18 @@ def main():
         power=0.75,
     )
 
+    num_patches = len(dataset) * (config.n_splits**2 if config.expand_dataset else 1)
+    steps_per_epoch = num_patches // config.train_batch_size
+    num_training_steps = steps_per_epoch * config.num_epochs
+
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=config.lr_warmup_steps,
-        num_training_steps=(len(train_dataloader) * config.num_epochs),
+        num_training_steps=num_training_steps,
     )
-    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, ema_model)
+    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, ema_model, steps_per_epoch)
 
 if __name__ == "__main__":
     main()
